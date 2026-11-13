@@ -551,6 +551,79 @@ WRITE: ViewModel → Repo impl [Domain → DTO] → Service (DTO) → API/DB
 
 > Domain models never leave domain+presentation; DTOs never enter them. All two-way translation is concentrated in the repository impl + mappers.
 
+### 5.12 Can layer boundaries (domain ≠ import data) be enforced without separate packages?
+
+**Yes** — via a linter/analyzer plugin. Violations are caught live in the IDE and fail `dart analyze` in CI, without splitting the code into separate packages.
+
+**The tools:**
+
+| Tool | How | Notes |
+|---|---|---|
+| **[`dart_boundaries`](https://pub.dev/packages/dart_boundaries)** | YAML config in `analysis_options.yaml`, built on `custom_lint` | The best fit; has `layer_boundaries` & `no_banned_imports` rules |
+| **[`import_lint`](https://pub.dev/packages/import_lint)** | Similar, define layers via YAML | Older, popular |
+| **DCM (`dart_code_metrics`)** | `avoid-banned-imports` rule | If you already use DCM |
+| **Write your own** with `custom_lint` | Custom rule | Flexible but more work |
+
+**Quick approach — `no_banned_imports`:**
+
+```yaml
+# analysis_options.yaml
+dart_boundaries:
+  no_banned_imports:
+    entries:
+      - paths: ['lib/features/**/domain/**']
+        deny: ['lib/features/**/data/**']
+        message: 'Domain layer must not import the data layer.'
+```
+
+**Fuller approach — `layer_boundaries` (define each layer's dependency direction):**
+
+```yaml
+dart_boundaries:
+  layer_boundaries:
+    elements:
+      - type: domain
+        pattern: 'lib/features/{{ feature }}/domain/**'
+      - type: data
+        pattern: 'lib/features/{{ feature }}/data/**'
+      - type: presentation
+        pattern: 'lib/features/{{ feature }}/presentation/**'
+    rules:
+      - from: domain
+        disallow: [data]          # ← the core rule
+      - from: presentation
+        allow: [domain]           # presentation may only see domain
+      - from: data
+        allow: [domain]           # data may see domain (to implement the contract)
+```
+
+`{{ feature }}` is a capture group — files with the same feature name are treated as intra-feature (still allowed), different names as cross-feature (which can also be banned if you want).
+
+**How it works:**
+- **Live in the IDE** — violations appear as warnings/errors as you type.
+- **CI** — `dart analyze` fails → PR is blocked.
+- Can be `// ignore:`d when an exception is genuinely needed.
+
+**Important limitation (honest):** a linter is a **soft boundary**, not a hard boundary.
+
+| | Folder + linter | Separate package |
+|---|---|---|
+| Mechanism | `dart analyze` / CI gate | **Compile error** |
+| Can a dev "write" violating code? | Can write, but fails analyze/CI | Cannot, import errors immediately |
+| Relies on | Folder naming convention (glob patterns) | `pubspec.yaml` declaration |
+| Scope for AI agents | Not automatic (one package) | Dependency graph limits context |
+
+Two key points:
+
+1. **The rule is path/glob-based**, so it's only as strong as your folder convention (`features/x/domain`, `features/x/data`). If a file lands in the wrong folder, the rule won't help.
+2. **It doesn't stop compilation** — only stops merges via CI. If CI is mandatory, it's effective.
+
+This is exactly what VGV does: they use a **custom analyzer for finer-grained rules** (naming, cross-feature data leaks, dependency cycles), **but still chose packages for the hard boundary** — because *"a layer violation is a compile error, not a review comment"*.
+
+**Recommendation:**
+- **Single app, small team, mandatory CI** → `dart_boundaries` (or `import_lint`) is enough, with no package overhead.
+- **Multi-app / many teams / AI-assisted / need the strongest guarantee** → move up to separate packages (FFCA), then add the linter on top for fine-grained rules.
+
 ---
 
 ## 6. Cheat Sheet — Golden Rules

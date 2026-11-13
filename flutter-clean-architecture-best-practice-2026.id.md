@@ -551,6 +551,79 @@ WRITE: ViewModel → Repo impl [Domain → DTO] → Service (DTO) → API/DB
 
 > Domain model tidak pernah keluar dari domain+presentation; DTO tidak pernah masuk ke dalamnya. Semua penerjemahan dua arah terkonsentrasi di impl repository + mapper.
 
+### 5.12 Bisakah batas layer (domain ≠ import data) di-enforce tanpa separate package?
+
+**Bisa** — lewat linter/analyzer plugin. Pelanggarannya ketahuan langsung di IDE dan menggagalkan `dart analyze` di CI, tanpa perlu memecah kode jadi package terpisah.
+
+**Alatnya:**
+
+| Alat | Cara | Catatan |
+|---|---|---|
+| **[`dart_boundaries`](https://pub.dev/packages/dart_boundaries)** | Konfigurasi YAML di `analysis_options.yaml`, dibangun di atas `custom_lint` | Paling pas; punya rule `layer_boundaries` & `no_banned_imports` |
+| **[`import_lint`](https://pub.dev/packages/import_lint)** | Mirip, definisikan layer via YAML | Lebih dulu populer |
+| **DCM (`dart_code_metrics`)** | rule `avoid-banned-imports` | Kalau kamu sudah pakai DCM |
+| **Tulis sendiri** dengan `custom_lint` | Rule custom | Fleksibel tapi lebih repot |
+
+**Cara cepat — `no_banned_imports`:**
+
+```yaml
+# analysis_options.yaml
+dart_boundaries:
+  no_banned_imports:
+    entries:
+      - paths: ['lib/features/**/domain/**']
+        deny: ['lib/features/**/data/**']
+        message: 'Domain layer tidak boleh mengimpor data layer.'
+```
+
+**Cara lebih lengkap — `layer_boundaries` (define arah dependensi tiap layer):**
+
+```yaml
+dart_boundaries:
+  layer_boundaries:
+    elements:
+      - type: domain
+        pattern: 'lib/features/{{ feature }}/domain/**'
+      - type: data
+        pattern: 'lib/features/{{ feature }}/data/**'
+      - type: presentation
+        pattern: 'lib/features/{{ feature }}/presentation/**'
+    rules:
+      - from: domain
+        disallow: [data]          # ← inti aturannya
+      - from: presentation
+        allow: [domain]           # presentation hanya boleh lihat domain
+      - from: data
+        allow: [domain]           # data boleh lihat domain (untuk implement kontrak)
+```
+
+`{{ feature }}` adalah capture group — file dengan nama feature sama dianggap intra-feature (tetap boleh), beda feature dianggap cross-feature (bisa dilarang juga kalau mau).
+
+**Cara kerjanya:**
+- **Live di IDE** — pelanggaran muncul sebagai warning/error saat menulis.
+- **CI** — `dart analyze` gagal → PR ter-blokir.
+- Bisa di-`// ignore:` kalau memang butuh pengecualian.
+
+**Batasan penting (jujur):** linter = **soft boundary**, bukan hard boundary.
+
+| | Folder + linter | Separate package |
+|---|---|---|
+| Mekanisme | `dart analyze` / CI gate | **Compile error** |
+| Dev bisa "nulis" kode pelanggar? | Bisa nulis, tapi gagal di analyze/CI | Tidak bisa, langsung error saat import |
+| Bergantung pada | Konvensi nama folder (glob pattern) | Deklarasi `pubspec.yaml` |
+| Scope buat AI agent | Tidak otomatis (semua satu paket) | Dependency graph membatasi konteks |
+
+Dua poin kuncinya:
+
+1. **Rule-nya berbasis path/glob**, jadi sekuat konvensi foldermu (`features/x/domain`, `features/x/data`). Kalau file ditaruh di folder yang salah, rule tidak menolong.
+2. **Tidak menghentikan compilation** — hanya menghentikan merge lewat CI. Kalau CI-mu wajib, ini efektif.
+
+Ini persis yang VGV lakukan: mereka pakai **custom analyzer untuk aturan yang lebih halus** (naming, cross-feature data leaks, dependency cycle), **tapi tetap memilih package untuk hard boundary** — karena *"a layer violation is a compile error, not a review comment"*.
+
+**Rekomendasi:**
+- **Single app, tim kecil, CI wajib** → `dart_boundaries` (atau `import_lint`) sudah cukup, tanpa overhead package.
+- **Multi-app / banyak tim / AI-assisted / butuh jaminan paling kuat** → naik ke separate package (FFCA), baru tambahkan linter di atasnya untuk aturan halus.
+
 ---
 
 ## 6. Cheat Sheet — Aturan Emas
