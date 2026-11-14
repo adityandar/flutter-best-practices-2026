@@ -624,6 +624,96 @@ This is exactly what VGV does: they use a **custom analyzer for finer-grained ru
 - **Single app, small team, mandatory CI** → `dart_boundaries` (or `import_lint`) is enough, with no package overhead.
 - **Multi-app / many teams / AI-assisted / need the strongest guarantee** → move up to separate packages (FFCA), then add the linter on top for fine-grained rules.
 
+### 5.13 A repository needed by 2 features — how to handle it?
+
+Don't duplicate it, don't put it in `shared/`. Make the repository its own **feature** (usually *headless*), then other features depend on its **domain**.
+
+Two complementary VGV rules:
+
+1. *"Feature domains may depend on other feature domains."*
+2. *"Repositories for each feature must be independent. The Cart domain should not define an IProductsRepository and vice-versa."*
+
+```
+features/
+├── destinations/           # headless (owns DestinationRepository)
+│   ├── domain/  (contract + entity)
+│   └── data/    (impl)
+├── trips/                  # consumer → imports destinations/domain only
+└── profile/                # second consumer → imports destinations/domain only
+```
+
+The DI wiring (impl → contract) stays in the composition root, so `trips` never learns where destinations are stored.
+
+> One repository = one owner (feature). Cross-feature use always goes through the domain contract.
+
+### 5.14 Cross-feature sharing — domain only
+
+What may be imported across features = **domain** (contract + entity). `data` and `presentation` stay private. This is **specific to VGV FFCA** (the official Flutter docs don't cover the feature-package level).
+
+**"Transitive" explained:** if `cart_data → cart_domain → product_domain`, then `product_domain` is a transitive dependency of `cart_data`. But in Dart, **imports are not transitive** — a file in `cart_data` must write its own import to use `Product`. So: *technically possible*, but **the architecture recommends against** the data layer touching another feature's domain.
+
+> What matters isn't headless or not — it's that **only the domain is exposed across features**.
+
+### 5.15 Backend already populates data — safe? + DTOs across features
+
+What's forbidden = **the repository re-fetching/joining across features on the client**. Backend-populated data is **safe**, because the mapper only maps, it doesn't fetch.
+
+```dart
+// ✅ backend returns nested; mapper maps both levels, no re-fetch
+class PostDto {
+  final String id;
+  final String title;
+  final PostAuthorDto author;   // LOCAL DTO, not UserDto from users
+}
+```
+
+But **cross-feature DTOs are not allowed**: `PostDto` (posts data) **must not** use `UserDto` (users data) — that's cross-feature `data → data`, violating VGV's *"must not export DTOs or mappers"*. Define a local DTO (`PostAuthorDto`), then the mapper maps it to the domain:
+
+```dart
+Post toDomain(PostDto dto) => Post(
+  id: dto.id, title: dto.title,
+  author: User(id: dto.author.id, name: dto.author.name), // → User (users_domain) — domain→domain ✅
+);
+```
+
+**Design choice** when `Post` holds a `User`:
+- **A:** `Post` directly holds `User` from `users_domain` (domain→domain).
+- **B:** `Post` holds a local projection (`PostAuthor { id, name, avatarUrl }`) — looser coupling, no dependency on `users_domain`.
+
+> Principle: a DTO is the data source's language, private per feature, never shared. Only the domain is shared across features.
+
+### 5.16 DI placement (composition root)
+
+Separate the **container** from the **wiring**:
+
+| | What | Where | May depend on features? |
+|---|---|---|---|
+| Container | the GetIt instance | `core/di/` | ❌ |
+| Wiring (registration) | bind interface → impl | **composition root** | ✅ |
+
+`core/` and `shared/` both **must not depend on features**. Registration (which needs feature imports) lives in the **composition root**:
+
+```dart
+// lib/app/register_di.dart — the only place that knows the impls
+class RegisterDi {
+  Future<void> init() async {   // async because SharedPreferences.getInstance()
+    final getIt = GetIt.instance;
+    // core-level (generic) → can stay here
+    // feature-level (wiring interface → impl) → also here
+  }
+}
+```
+
+```dart
+// main.dart — thin bootstrap
+await RegisterDi().init();
+runApp(const App());
+```
+
+For larger projects: per-feature registration modules (`features/<x>/di/`) composed from `main.dart`.
+
+> Container in `core/di`, wiring in the composition root. `app/` sits above all layers, so it's free to import.
+
 ---
 
 ## 6. Cheat Sheet — Golden Rules
@@ -645,6 +735,8 @@ This is exactly what VGV does: they use a **custom analyzer for finer-grained ru
 | 13 | Repositories never know each other; combine in the ViewModel/use case |
 | 14 | DI for everything: components are injected, not instantiated in widgets |
 | 15 | App-wide session state (login, cache) lives in the repository via DI |
+| 16 | Cross-feature sharing is domain-only (contract + entity); data & presentation stay private |
+| 17 | DI: container in core, wiring in the composition root (app/register_di) |
 
 ---
 

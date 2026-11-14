@@ -624,6 +624,96 @@ Ini persis yang VGV lakukan: mereka pakai **custom analyzer untuk aturan yang le
 - **Single app, tim kecil, CI wajib** → `dart_boundaries` (atau `import_lint`) sudah cukup, tanpa overhead package.
 - **Multi-app / banyak tim / AI-assisted / butuh jaminan paling kuat** → naik ke separate package (FFCA), baru tambahkan linter di atasnya untuk aturan halus.
 
+### 5.13 Repository dipakai 2 feature — treatmentnya?
+
+Jangan di-duplikasi, jangan ditaruh di `shared/`. Jadikan repository itu **fitur sendiri** (biasanya *headless*), lalu feature lain depend ke **domain**-nya.
+
+Dua aturan VGV yang saling melengkapi:
+
+1. *"Feature domains may depend on other feature domains."*
+2. *"Repositories for each feature must be independent. The Cart domain should not define an IProductsRepository and vice-versa."*
+
+```
+features/
+├── destinations/           # headless (pemilik DestinationRepository)
+│   ├── domain/  (kontrak + entity)
+│   └── data/    (impl)
+├── trips/                  # konsumen → import destinations/domain saja
+└── profile/                # konsumen kedua → import destinations/domain saja
+```
+
+DI yang menyambungkan impl → kontrak tetap di composition root, jadi `trips` tidak tahu impl destinasi disimpan di mana.
+
+> Satu repository = satu pemilik (feature). Pemakaian lintas feature selalu lewat kontrak domain.
+
+### 5.14 Sharing antar feature — hanya domain
+
+Yang boleh di-import lintas feature = **domain** (kontrak + entity). `data` dan `presentation` masing-masing private. Ini **khusus aturan VGV FFCA** (docs resmi Flutter tidak membahas level feature-package).
+
+**"Transitif" dijelaskan:** kalau `cart_data → cart_domain → product_domain`, maka `product_domain` adalah dependensi transitif dari `cart_data`. Tapi di Dart, **import tidak transitif** — file di `cart_data` harus menulis import sendiri kalau mau pakai `Product`. Jadi: *secara teknis bisa*, tapi **arsitektur tidak menyarankan** data layer menyentuh domain feature lain.
+
+> Yang menentukan bukan headless/tidak — tapi **"yang dibuka lintas feature hanya domain"**.
+
+### 5.15 Backend sudah populate data — aman? + DTO lintas feature
+
+Yang dilarang = **repository re-fetch/join lintas feature di client**. Backend yang sudah populate **aman**, karena mapper cuma mapping, bukan fetch.
+
+```dart
+// ✅ backend return nested; mapper map dua level, tanpa fetch ulang
+class PostDto {
+  final String id;
+  final String title;
+  final PostAuthorDto author;   // DTO LOKAL, bukan UserDto dari users
+}
+```
+
+Tapi **DTO lintas feature tidak boleh**: `PostDto` (posts data) **tidak boleh** memakai `UserDto` (users data) — itu cross-feature `data → data`, melanggar aturan VGV *"must not export DTOs or mappers"*. Definisikan DTO lokal (`PostAuthorDto`), lalu mapper memetakannya ke domain:
+
+```dart
+Post toDomain(PostDto dto) => Post(
+  id: dto.id, title: dto.title,
+  author: User(id: dto.author.id, name: dto.author.name), // → User (users_domain) — domain→domain ✅
+);
+```
+
+**Pilihan desain** saat `Post` memuat `User`:
+- **A:** `Post` langsung memuat `User` dari `users_domain` (domain→domain).
+- **B:** `Post` memuat projection lokal (`PostAuthor { id, name, avatarUrl }`) — lebih lepas, tidak depend ke `users_domain`.
+
+> Prinsip: DTO = bahasa sumber data, private per feature, tidak dibagi. Yang dibagi lintas feature cuma domain.
+
+### 5.16 Penempatan DI (composition root)
+
+Pisahkan **container** dari **wiring**:
+
+| | Apa | Di mana | Boleh depend ke feature? |
+|---|---|---|---|
+| Container | instance GetIt | `core/di/` | ❌ |
+| Wiring (registration) | ikat interface → impl | **composition root** | ✅ |
+
+`core/` dan `shared/` sama-sama **tidak boleh depend ke feature**. Registration yang butuh import feature ditaruh di **composition root**:
+
+```dart
+// lib/app/register_di.dart — satu-satunya tempat yang tahu impl
+class RegisterDi {
+  Future<void> init() async {   // async karena SharedPreferences.getInstance()
+    final getIt = GetIt.instance;
+    // core-level (generik) → boleh di sini
+    // feature-level (wiring interface → impl) → di sini juga
+  }
+}
+```
+
+```dart
+// main.dart — bootstrap tipis
+await RegisterDi().init();
+runApp(const App());
+```
+
+Alternatif untuk project besar: modul registrasi per feature (`features/<x>/di/`) yang di-compose dari `main.dart`.
+
+> Container di `core/di`, wiring di composition root. `app/` duduk di atas semua layer, jadi bebas import.
+
 ---
 
 ## 6. Cheat Sheet — Aturan Emas
@@ -645,6 +735,8 @@ Ini persis yang VGV lakukan: mereka pakai **custom analyzer untuk aturan yang le
 | 13 | Repository tidak saling kenal; gabungkan di ViewModel/use case |
 | 14 | DI untuk semua: komponen di-inject, tidak di-instantiate di widget |
 | 15 | App-wide session state (login, cache) tinggal di repository via DI |
+| 16 | Cross-feature sharing hanya di domain (kontrak + entity); data & presentation private |
+| 17 | DI: container di core, wiring di composition root (app/register_di) |
 
 ---
 
